@@ -1,0 +1,32 @@
+# Virtual environments & caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Training logs, TensorBoard events, and generated artifacts
+runs/
+logs/
+outputs/
+*.tfevents.*
+MUJOCO_LOG.TXT
+
+# Never commit binary model weights / checkpoints (MyoSuite policy)
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
