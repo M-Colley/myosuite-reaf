@@ -71,16 +71,16 @@ git clone https://github.com/M-Colley/myosuite-reaf.git
 cd myosuite-reaf
 
 uv venv --python 3.13
+printf 'mujoco[sysid]>=4.0.0\n' > uv-overrides.txt
 # Install CUDA-enabled PyTorch first (adjust cu128 / cu132 for your driver), then myosuite-reaf:
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
-uv pip install -e ".[dev]"
+uv pip install -e ".[dev]" --override uv-overrides.txt
 ```
 
 ### CPU-Only (Linux / macOS / Windows)
 
 ```bash
-uv venv --python 3.13
-uv pip install -e ".[dev]"
+uv sync --extra dev --python 3.13
 ```
 
 ---
@@ -248,12 +248,14 @@ python scripts/probe_mj3_vs_mj4.py
 
 `myosuite-reaf` is intentionally structured so its modules map 1-to-1 into `MyoSuite` once `MyoSuite` and `myo-sim` lift their `mujoco<4` cap:
 
-1. **Upstream `reaf-sim` & `mujoco_playground` PRs** (detailed in [`DOGFOODING_REPORT.md`](DOGFOODING_REPORT.md)):
-   - Add `act`, `actuator_length`, `actuator_velocity`, and `set_act()` to `ActuatorDevice` and fix `BoundDataAccessor.act` (`data.act` indexed via `actuator_actadr`).
-   - Add an optional post-step `sim.forward()` hook on `is_last_substep` in `DeviceLayer._substep()`.
-   - Default `builders.config.Sim.simulation_timestep` to `None` so MJCF `<option timestep="..."/>` is preserved unless explicitly overridden.
-   - Fix `ArticulatedDevice` unnamed `<freejoint/>` filtering and `joint_range` `(nq, 2)` vs `(njnt, 2)` shape mismatch.
-   - Guard `Environment._reset()` against `torch.inference_mode()` in-place mutation crashes after `rsl-rl` `OnPolicyRunner.learn()`.
+1. **Submitted Upstream `reaf-sim` & `mujoco_playground` PRs** (detailed in [`DOGFOODING_REPORT.md`](DOGFOODING_REPORT.md)):
+   - [`reaf-sim#11`](https://github.com/google-deepmind/reaf-sim/pull/11): Refresh post-step derived simulator quantities via `self.sim.forward()` on `is_last_substep` in `DeviceLayer._substep()`.
+   - [`reaf-sim#12`](https://github.com/google-deepmind/reaf-sim/pull/12): Prevent `torch.inference_mode()` tensor tainting across `Environment`, `DeviceLayer`, `TaskLayer`, `Simulator`, `Clock`, and `TorchTensor`.
+   - [`reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13): Support `act` and `act_dot` spans on `BoundDataAccessor` (`data.act` / `data.act_dot` indexed via `actuator_actadr` / `actuator_actnum`).
+   - [`reaf-sim#14`](https://github.com/google-deepmind/reaf-sim/pull/14): Add `"act"`, `"actuator_length"`, `"actuator_velocity"`, and `set_act()` to `ActuatorDevice`.
+   - [`reaf-sim#15`](https://github.com/google-deepmind/reaf-sim/pull/15): Retain unnamed `<freejoint/>` joints and fix `joint_range` `(num_joints, 2)` shapes in `ArticulatedDevice`.
+   - [`mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390): Split flat RSL-RL actions across multi-key `action_spec` dicts and round `checker.timeout / control_dt`.
+   - [`mujoco_playground#391`](https://github.com/google-deepmind/mujoco_playground/pull/391): Support Windows file locking in `asset_loader.py` (`msvcrt.locking` fallback for `fcntl.flock`).
 2. **`myo-sim` v0.3 Release:** Widen `mujoco>=3.4,<5`, assign explicit attachment prefixes in `myoarm_r`, and backport the `MyoSuite` `<body name="torso">` frame fix into `myotorso_rigid_chain.xml`.
 3. **Move `src/myosuite_reaf/` -> `myosuite/envs/myo/backends/reaf/`:** Wire `make_env(..., backend="reaf")` alongside `MyoGymnasiumEnv` and `mjlab`, regenerating parity baselines under MuJoCo 4 (accounting for MuJoCo 4's updated cylinder/sphere spatial tendon `actuator_acc0` on `recfem_r`/`recfem_l`).
 

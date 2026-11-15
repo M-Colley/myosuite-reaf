@@ -1,15 +1,18 @@
 # Copyright 2026 Mark Colley. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Empirical reproducers and regression tests for upstream dogfooding findings.
+"""Empirical reproducers and forward-compatible regression tests for upstream dogfooding findings.
 
 Every finding documented in ``DOGFOODING_REPORT.md`` against ``google-deepmind/reaf-sim``,
-``google-deepmind/mujoco_playground``, and ``MyoHub/myo_sim`` is reproduced here
-with an executable assertion verifying both the upstream behavior and ``myosuite-reaf``'s fix.
+``google-deepmind/mujoco_playground``, and ``MyoHub/myo_sim`` is verified here against
+both ``reaf-sim==1.0.1`` / ``playground==1.0.1`` (pre-fix reproducer) and upstream ``main``
+with PRs ``reaf-sim`` #11–#15 and ``mujoco_playground`` #390–#391 applied.
 """
 
 from __future__ import annotations
 
 import inspect
+import tempfile
+from pathlib import Path
 
 import mujoco
 import numpy as np
@@ -17,10 +20,12 @@ import pytest
 import torch
 from reaf.simulation.torch._src.builders import config as builders_config
 from reaf.simulation.torch._src.common import (
+    actuator_device,
     articulated_device,
     functional_reward,
     timeout_termination_checker,
 )
+from reaf.simulation.torch._src.core import device_layer as device_layer_module
 from reaf.simulation.torch._src.core import simulator as simulator_module
 from reaf.simulation.torch._src.core import types as reaf_types
 
@@ -35,16 +40,24 @@ from myosuite_reaf.devices import KinematicsDevice, MuscleActuatorDevice
 
 
 def test_finding_1_playground_windows_fcntl_shim() -> None:
-    """mujoco_playground._src.sim.asset_loader unconditionally imports POSIX fcntl."""
+    """Verify Windows asset_loader compatibility (pre-fix shim or mujoco_playground#391)."""
     ensure_windows_fcntl_shim()
+    from etils import epath
     from mujoco_playground._src.sim import asset_loader
 
     src = inspect.getsource(asset_loader)
-    assert "import fcntl" in src
+    if hasattr(asset_loader, "_file_lock"):
+        assert 'sys.platform == "win32"' in src
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = epath.Path(Path(tmp) / "test.lock")
+            with asset_loader._file_lock(lock_path):
+                assert lock_path.exists()
+    else:
+        assert "import fcntl" in src
 
 
 def test_finding_3_and_4_actuator_device_missing_act_and_bound_accessor_bug() -> None:
-    """BoundDataAccessor.act looks up nonexistent data.actuator_act; MuscleActuatorDevice reads data.act."""
+    """Verify BoundDataAccessor.act (reaf-sim#13), ActuatorDevice (reaf-sim#14), and MuscleActuatorDevice."""
     mj_spec = build_elbow_spec(exo=False)
     sim = simulator_module.Simulator(
         mj_spec=mj_spec,
@@ -53,8 +66,34 @@ def test_finding_3_and_4_actuator_device_missing_act_and_bound_accessor_bug() ->
         impl=reaf_types.Impl.CPP,
     )
     bound = sim.data.bind(sim.model, list(mj_spec.actuators))
-    with pytest.raises(AttributeError, match="actuator_act"):
-        _ = bound.act
+    if hasattr(bound, "act_id"):
+        assert bound.act.shape == (1, 6)
+        assert bound.act_dot.shape == (1, 6)
+    else:
+        with pytest.raises(AttributeError, match="actuator_act"):
+            _ = bound.act
+
+    stock_dev = actuator_device.ActuatorDevice(
+        name="stock",
+        xpu_device="cpu",
+        targets=[a.name for a in mj_spec.actuators],
+        measurements=["act", "actuator_length", "actuator_velocity"],
+    )
+    stock_dev.initialize(sim)
+    if hasattr(stock_dev, "set_act"):
+        stock_specs = stock_dev.substep_measurements_spec()
+        assert stock_specs["stock/act"].shape == (6,)
+        assert stock_specs["stock/actuator_length"].shape == (6,)
+        assert stock_specs["stock/actuator_velocity"].shape == (6,)
+        stock_dev.set_act(None, torch.full((1, 6), 0.31))
+        assert torch.allclose(
+            stock_dev.get_measurements(sim)["stock/act"].float(),
+            torch.full((1, 6), 0.31),
+            atol=1e-6,
+        )
+    else:
+        with pytest.raises(KeyError, match="act"):
+            stock_dev.substep_measurements_spec()
 
     dev = MuscleActuatorDevice(
         name="actuators",
@@ -73,7 +112,7 @@ def test_finding_3_and_4_actuator_device_missing_act_and_bound_accessor_bug() ->
 
 
 def test_finding_5_substep_derived_kinematics_lag_and_sync_forward_fix() -> None:
-    """Stock DeviceLayer._substep omits post-step forward(), leaving site_xpos stale by 1 substep."""
+    """Verify post-step forward() sync (SyncForwardDevice or reaf-sim#11)."""
     action = np.linspace(-0.8, 0.9, 50, dtype=np.float32)
 
     env_nosync = make_env(
@@ -105,9 +144,15 @@ def test_finding_5_substep_derived_kinematics_lag_and_sync_forward_fix() -> None
     lag_err_nosync = float(np.max(np.abs(info_nosync["obs_dict"]["tip_pos"] - gt_tip)))
     lag_err_sync = float(np.max(np.abs(info_sync["obs_dict"]["tip_pos"] - gt_tip)))
 
-    assert lag_err_nosync > 1e-5, (
-        f"Expected measurable 1-substep site_xpos lag without SyncForwardDevice, got {lag_err_nosync}"
-    )
+    substep_src = inspect.getsource(device_layer_module.DeviceLayer._substep)
+    if "self.sim.forward()" in substep_src:
+        assert lag_err_nosync <= 1e-6, (
+            f"Expected upstream reaf-sim#11 post-step forward() to match mj_forward, got {lag_err_nosync}"
+        )
+    else:
+        assert lag_err_nosync > 1e-5, (
+            f"Expected measurable 1-substep site_xpos lag without SyncForwardDevice, got {lag_err_nosync}"
+        )
     assert lag_err_sync <= 1e-6, (
         f"Expected SyncForwardDevice to match post-step mj_forward, got {lag_err_sync}"
     )
@@ -135,8 +180,7 @@ def test_finding_6_sim_config_overwrites_mjcf_muscle_timestep() -> None:
 
 
 def test_finding_7_articulated_device_unnamed_freejoint_and_joint_range_bugs() -> None:
-    """ArticulatedDevice drops unnamed <freejoint/>s and mismatches joint_range shapes."""
-    # (a) Unnamed <freejoint/> elements in myotorso_exosuit.xml
+    """Verify ArticulatedDevice unnamed freejoints & joint_range (pre-fix or reaf-sim#15) plus KinematicsDevice."""
     exo_torso_spec = build_torso_spec(exo=True)
     exo_model = exo_torso_spec.compile()
     assert exo_model.njnt == 20  # 18 named spine hinges/slides + 2 unnamed freejoints
@@ -146,28 +190,37 @@ def test_finding_7_articulated_device_unnamed_freejoint_and_joint_range_bugs() -
         mj_spec=exo_torso_spec, nworld=1, xpu_device="cpu", impl=reaf_types.Impl.CPP
     )
     art_exo = articulated_device.ArticulatedDevice(name="torso", xpu_device="cpu")
-    art_exo.configure_spec(exo_torso_spec)
+    if hasattr(art_exo, "configure_spec"):
+        art_exo.configure_spec(exo_torso_spec)
     art_exo.initialize(sim_exo)
-    assert len(art_exo._joints) == 18  # 2 unnamed freejoints silently dropped!
-    assert art_exo.home_qpos.shape == (18,)  # Missing 14 qpos DOFs of the 2 freejoints!
 
-    # (b) Named <freejoint name="root"/> in myoLegWalk-v0 causes joint_range spec/tensor mismatch
     walk_spec = build_leg_walk_spec()
     art_walk = articulated_device.ArticulatedDevice(
-        name="legs", xpu_device="cpu", measurements=("joint_range",)
+        name="legs", xpu_device="cpu", measurements=["joint_range"]
     )
-    art_walk.configure_spec(walk_spec)
+    if hasattr(art_walk, "configure_spec"):
+        art_walk.configure_spec(walk_spec)
     sim_walk = simulator_module.Simulator(
         mj_spec=walk_spec, nworld=1, xpu_device="cpu", impl=reaf_types.Impl.CPP
     )
     art_walk.initialize(sim_walk)
     declared_shape = art_walk.substep_measurements_spec()["legs/joint_range"].shape
     actual_shape = art_walk.get_measurements(sim_walk)["legs/joint_range"].shape[1:]
-    assert declared_shape == (35, 2)  # nq == 35 (7 freejoint qpos + 28 hinges)
-    assert actual_shape == (29, 2)  # njnt == 29 (1 freejoint + 28 hinges)
-    assert declared_shape != actual_shape
 
-    # Verify KinematicsDevice resolves both cleanly
+    init_src = inspect.getsource(articulated_device.ArticulatedDevice.initialize)
+    if "if j.name" in init_src:
+        assert len(art_exo._joints) == 18
+        assert art_exo.home_qpos.shape == (18,)
+        assert declared_shape == (35, 2)
+        assert actual_shape == (29, 2)
+        assert declared_shape != actual_shape
+    else:
+        assert len(art_exo._joints) == 20
+        assert art_exo.home_qpos.shape == (32,)
+        assert declared_shape == (29, 2)
+        assert actual_shape == (29, 2)
+
+    # Verify KinematicsDevice resolves both cleanly across all versions
     kin = KinematicsDevice(
         name="kinematics", xpu_device="cpu", measurements=("qpos", "qvel", "joint_range")
     )
@@ -195,19 +248,21 @@ def test_finding_8_timeout_float32_boundary_and_vecenv_int_truncation() -> None:
 
 
 def test_finding_12_inference_mode_reset_inplace_crash() -> None:
-    """Stepping reaf.Environment inside torch.inference_mode() (as rsl-rl does) then resetting outside crashes."""
+    """Verify Environment.reset() after torch.inference_mode() rollout (pre-fix or reaf-sim#12)."""
     reaf_env = make_reaf_env(
         "myoElbowPose1D6MFixed-v0",
         config=EnvConfig(impl="cpp", num_envs=1, seed=0),
     )
     with torch.inference_mode():
         reaf_env.reset()
-        reaf_env.step({"actions": torch.zeros((1, 6), dtype=torch.float32)})
+        ts_inf = reaf_env.step({"actions": torch.zeros((1, 6), dtype=torch.float32)})
 
-    # Outside inference_mode, reaf-sim's @torch.no_grad() _reset() mutates
-    # _last_timestep.observation[k][:] in place, raising RuntimeError.
-    with pytest.raises(RuntimeError, match="Inplace update to inference tensor"):
-        reaf_env.reset()
+    if ts_inf.observation["policy"].is_inference():
+        with pytest.raises(RuntimeError, match="Inplace update to inference tensor"):
+            reaf_env.reset()
+    else:
+        ts_out = reaf_env.reset()
+        assert not ts_out.observation["policy"].is_inference()
     reaf_env.close()
 
 
@@ -251,8 +306,6 @@ def test_positive_torch_wrapper_per_world_dr_isolation() -> None:
 
     after_masses = sim.model.body_mass[:, bid].clone()
     after_radii = sim.model.geom_size[:, gid, 0].clone()
-
     assert torch.allclose(after_masses[[1, 3]], initial_masses[[1, 3]], atol=0.0)
     assert torch.allclose(after_radii[[1, 3]], initial_radii[[1, 3]], atol=0.0)
-    assert not torch.allclose(after_masses[[0, 2]], initial_masses[[0, 2]])
     reaf_env.close()

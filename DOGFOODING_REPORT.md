@@ -70,7 +70,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
 - **Root Cause:** `asset_loader.py` unconditionally executes `import fcntl` at module import time to lock file cache writes (`fcntl.flock(lock_file, fcntl.LOCK_EX)`). Because `fcntl` is POSIX-only, importing any `mujoco_playground` module raises `ModuleNotFoundError: No module named 'fcntl'` on Windows—even when all simulation assets come from local `MjSpec` objects and `asset_loader` is never invoked.
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_1_playground_windows_fcntl_shim`
 - **Workaround in `myosuite-reaf`:** [`_compat.py`](src/myosuite_reaf/_compat.py) installs a `msvcrt.locking`-backed shim on `sys.modules["fcntl"]` before importing `mujoco_playground`.
-- **Proposed Upstream Fix:** Guard `import fcntl` with `if sys.platform != "win32":` (falling back to `msvcrt.locking` or `filelock` on Windows).
+- **Upstream PR:** [`google-deepmind/mujoco_playground#391`](https://github.com/google-deepmind/mujoco_playground/pull/391) — replaces the unconditional `fcntl.flock` call with a cross-platform `_file_lock` context manager (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows).
 
 ---
 
@@ -98,7 +98,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
   2. On `Impl.CPP`, `TorchWrapper` wraps C++ `MjData` (`float64`) via zero-copy `torch.from_numpy`, whereas `Impl.WARP` uses `float32`. `substep_measurements_spec()` declares `dtype=np.float32`, yet `get_measurements()` returns raw `float64` views on CPU, causing downstream `FeatureProducer`s to emit `float64` on CPU vs `float32` on GPU unless explicitly `.to(torch.float32)`-cast.
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_3_and_4_actuator_device_missing_act_and_bound_accessor_bug`
 - **Workaround in `myosuite-reaf`:** Implemented [`MuscleActuatorDevice`](src/myosuite_reaf/devices/muscle_actuator_device.py) supporting mixed stateful (`DYNTYPE_MUSCLE`) and stateless (`DYNTYPE_NONE` exo motor) actuators via `mj_model.actuator_actadr` / `actuator_actnum` and casting measurements to `torch.float32`.
-- **Proposed Upstream Fix:** Add `"act"`, `"actuator_length"`, `"actuator_velocity"`, and `set_act()` directly to `ActuatorDevice` (indexing `sim.data.act` via `actuator_actadr` for actuators with `actnum > 0`), and cast CPU `get_measurements()` outputs to match `substep_measurements_spec()`'s `float32` contract.
+- **Upstream PR:** [`google-deepmind/reaf-sim#14`](https://github.com/google-deepmind/reaf-sim/pull/14) — exposes `"act"`, `"actuator_length"`, `"actuator_velocity"`, and `set_act(env_mask, act)` on `ActuatorDevice`.
 
 ---
 
@@ -107,7 +107,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
 - **Severity:** Medium (bug in `sim.data.bind(...)`)
 - **Root Cause:** When binding `mjsActuator` specs via `bound = sim.data.bind(sim.model, actuator_specs)`, `BoundDataAccessor.__getattr__("act")` prepends the element prefix `"actuator_"` and looks up `data.actuator_act`. In MuJoCo (`MjData` and `mjw.Data`), activations live in `data.act` (`(nworld, na)`), NOT `data.actuator_act`, and `na` need not equal `nu` (e.g., `myoElbowPose1D6MExoRandom-v0` has `nu=7, na=6`; pneumatic/filter actuators can also have `actnum > 1`).
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_3_and_4_actuator_device_missing_act_and_bound_accessor_bug`
-- **Proposed Upstream Fix:** Special-case `"act"` in `BoundDataAccessor` when bound to `mjtObj.mjOBJ_ACTUATOR`: resolve slice/indices through `model.actuator_actadr` and `model.actuator_actnum` into `data.act` (raising a clear `ValueError` if bound actuators have `actnum == 0`).
+- **Upstream PR:** [`google-deepmind/reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13) — resolves `act` and `act_dot` spans on `BoundDataAccessor` via `actuator_actadr` and `actuator_actnum`.
 
 ---
 
@@ -120,7 +120,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
   - Empirically on `myoLegWalk-v0` (`sim_dt=0.002s`), omitting post-step `forward()` leaves `actuator_force` stale by **72.87 N**, `cvel` stale by **0.752 rad/s**, and `site_xpos` stale by **1.27 mm** on both `Impl.CPP` and `Impl.WARP`.
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_5_substep_derived_kinematics_lag_and_sync_forward_fix`
 - **Workaround in `myosuite-reaf`:** Added [`SyncForwardDevice`](src/myosuite_reaf/devices/sync_forward_device.py) as the first device in `DeviceLayer`; its `get_measurements()` calls `sim.forward()` once when `_substep_idx == _n_substeps - 1` (driven by `on_substep_post_step`), reducing post-step `site_xpos` lag from `> 1e-3 m` to `0.0` (`<= 1e-7` float32 ULP).
-- **Proposed Upstream Fix:** Add `forward_after_last_substep: bool = True` (or auto-enable when any device reads derived stage-pos/vel/acc quantities) in `DeviceLayer._substep()` right after `self._sim.step()` when `is_last_substep` is `True`.
+- **Upstream PR:** [`google-deepmind/reaf-sim#11`](https://github.com/google-deepmind/reaf-sim/pull/11) — calls `self.sim.forward()` on `is_last_substep` right after `self.sim.step()` in `DeviceLayer._substep()`.
 
 ---
 
@@ -141,7 +141,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
   2. **`joint_range` spec vs runtime tensor shape mismatch (`lines 139-164`):** When a named `<freejoint name="root"/>` *is* present (e.g. `myoLegWalk-v0`, `njnt=29, nq=35`), `substep_measurements_spec()` declares `joint_range` with shape `(self._nq, 2)` == `(35, 2)`, whereas `get_measurements()` returns `self._bound_joints.range`, which has shape `(nworld, njnt, 2)` == `(nworld, 29, 2)`!
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_7_articulated_device_unnamed_freejoint_and_joint_range_bugs`
 - **Workaround in `myosuite-reaf`:** [`KinematicsDevice`](src/myosuite_reaf/devices/kinematics_device.py) indexes compiled `sim.mj_model` directly (`nq` for `qpos`, `nv` for `qvel`, `njnt` for `jnt_range`), handling named and unnamed freejoints identically.
-- **Proposed Upstream Fix:** Include unnamed joints in `ArticulatedDevice` (or index by joint ID rather than requiring non-empty `j.name`), and declare `joint_range` shape as `(len(self._joints), 2)` instead of `(self._nq, 2)`.
+- **Upstream PR:** [`google-deepmind/reaf-sim#15`](https://github.com/google-deepmind/reaf-sim/pull/15) — retains unnamed joints (`list(mj_spec.joints)`) in `ArticulatedDevice.initialize()` and fixes `joint_range` spec/measurement shapes to `(len(self._joints), 2)` / `(nworld, len(self._joints), 2)`.
 
 ---
 
@@ -154,7 +154,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
   1. `TimeoutTerminationChecker` evaluates `time > self._timeout` strictly in `float32`. Because `N * sim_dt` accumulated in `float32` can land `-1 ULP` below `timeout` (e.g. `1.9999999` vs `2.0`), an episode configured for `100` steps (`2.0s` at `dt=0.02s`) can terminate on step `100` or step `101` depending on `sim_dt` binary representation.
   2. `vecenv_wrapper.py:48` computes `max_episode_length = int(episode_length_secs / ctrl_dt)` instead of `round(...)`. For `episode_length_secs=0.58, ctrl_dt=0.02`, IEEE-754 `0.58 / 0.02 == 28.999999999999996`, so `int(...)` truncates to `28` instead of `29`.
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_8_timeout_float32_boundary_and_vecenv_int_truncation`
-- **Proposed Upstream Fix:** Use `time >= (self._timeout - 0.5 * sim_dt)` in `TimeoutTerminationChecker` and `int(round(episode_length_secs / ctrl_dt))` in `RslRlVecEnvWrapper`.
+- **Upstream PR:** [`google-deepmind/mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390) — uses `round(checker.timeout / control_dt)` in `_derive_max_episode_length` (and `time >= (self._timeout - 0.5 * sim_dt)` remains an optional follow-up for `TimeoutTerminationChecker`).
 
 ---
 
@@ -168,7 +168,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
   ```
   passing the entire `(nworld, 7)` tensor into the first key alone and omitting all remaining action keys!
 - **Workaround in `myosuite-reaf`:** Unified hybrid muscle + exoskeleton actuation (`myoElbowPose1D6MExo*`) under a single `"actions"` key in `ExcitationPipelineProcessor` + `MuscleActuatorDevice`, selectively applying muscle sigmoid/noise/fatigue only to the muscle indices (`actuator_Mask`).
-- **Proposed Upstream Fix:** Split `clipped_actions` across `self._env.action_spec().items()` using `torch.split` by each spec's `shape[-1]`.
+- **Upstream PR:** [`google-deepmind/mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390) — splits flat `(nworld, num_actions)` tensors across all `action_spec` keys in both `RslRlVecEnvWrapper.step()` and `play._RslRlPolicy.step()`.
 
 ---
 
@@ -205,7 +205,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
     where `observations_w_reset` aliases `self._last_timestep.observation` (an inference tensor!), immediately crashing with:
     `RuntimeError: Inplace update to inference tensor outside InferenceMode is not allowed`.
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_12_inference_mode_reset_inplace_crash`
-- **Proposed Upstream Fix:** In `Environment._reset()` (`environment.py:424-435`), allocate a fresh non-inference tensor (`observations_w_reset[k] = torch.where(...)` or `.clone()` when `observations_w_reset[k].is_inference()`) on full/partial resets instead of mutating `observations_w_reset[k][:]` in-place, or decorate `Environment` entrypoints consistently.
+- **Upstream PR:** [`google-deepmind/reaf-sim#12`](https://github.com/google-deepmind/reaf-sim/pull/12) — guards `TorchTensor.__init__`, `Environment`, `DeviceLayer`, `TaskLayer`, `Simulator`, `Clock`, and `flat_scene.build_*` against `torch.inference_mode()` tensor tainting and replaces in-place `TimeStep` mutations with out-of-place `torch.where`.
 
 ---
 
@@ -273,12 +273,16 @@ Generated via [`scripts/benchmark_throughput.py`](scripts/benchmark_throughput.p
 
 ---
 
-## 6. Recommended Upstream PR Sequence (`google-deepmind/reaf-sim` & `mujoco_playground`)
+## 6. Submitted Upstream PRs (`google-deepmind/reaf-sim` & `google-deepmind/mujoco_playground`)
 
-If helpful to the DeepMind team, all five highest-leverage fixes are small, self-contained PRs we are happy to submit directly:
+All seven focused, single-concern upstream PRs have been opened against `main`:
 
-1. **`reaf-sim` PR 1 (Bugfix):** Fix `Environment._reset()` in-place mutation crash on inference tensors after `torch.inference_mode()` rollouts (**Finding 12**) + `BoundDataAccessor.act` indexing via `actuator_actadr` (**Finding 4**).
-2. **`reaf-sim` PR 2 (Accuracy):** Add `forward_after_last_substep: bool = True` to `DeviceLayer._substep()` so `site_xpos`, `cvel`, `actuator_force`, and sensors are synchronized with integrated `qpos`/`qvel`/`act` (**Finding 5**).
-3. **`reaf-sim` PR 3 (Biomechanics / Actuators):** Add `"act"`, `"actuator_length"`, `"actuator_velocity"`, `set_act()`, and consistent `float32` measurement casting to `ActuatorDevice` (**Finding 3**), plus `simulation_timestep: float | None = None` in `builders.config.Sim` (**Finding 6**).
-4. **`reaf-sim` PR 4 (Floating-Base / Multi-Body):** Fix `ArticulatedDevice` unnamed `<freejoint/>` filtering and `joint_range` `(nq, 2)` vs `(njnt, 2)` spec mismatch (**Finding 7**).
-5. **`mujoco_playground` PR 5 (RL & Cross-Platform):** Split multi-key `action_spec` tensors properly in `RslRlVecEnvWrapper.step()` (**Finding 9**), use `round(episode_length_secs / ctrl_dt)` (**Finding 8**), and guard POSIX `import fcntl` in `asset_loader.py` (**Finding 1**).
+| PR | Finding(s) | Summary |
+| :--- | :--- | :--- |
+| [`reaf-sim#11`](https://github.com/google-deepmind/reaf-sim/pull/11) | Finding 5 | Refresh derived simulator quantities (`self.sim.forward()`) after the final physics substep in `DeviceLayer._substep()`. |
+| [`reaf-sim#12`](https://github.com/google-deepmind/reaf-sim/pull/12) | Finding 12 | Prevent `torch.inference_mode()` tensor tainting across `Environment`, `DeviceLayer`, `TaskLayer`, `Simulator`, `Clock`, and `TorchTensor`, and avoid in-place `TimeStep` mutation. |
+| [`reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13) | Finding 4 | Support `act` and `act_dot` spans on `BoundDataAccessor` (`sim.data.bind(sim.model, actuator_specs)`) via `actuator_actadr` / `actuator_actnum`. |
+| [`reaf-sim#14`](https://github.com/google-deepmind/reaf-sim/pull/14) | Finding 3 | Expose `"act"`, `"actuator_length"`, `"actuator_velocity"` measurements and `set_act(env_mask, act)` on `ActuatorDevice`. |
+| [`reaf-sim#15`](https://github.com/google-deepmind/reaf-sim/pull/15) | Finding 7 | Retain unnamed joints (`<freejoint/>`) in `ArticulatedDevice.initialize()` and fix `joint_range` spec/measurement shapes (`(num_joints, 2)` / `(nworld, num_joints, 2)`). |
+| [`mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390) | Findings 8 & 9 | Split flat RSL-RL actions across multi-key `action_spec` dicts in `RslRlVecEnvWrapper` and `play._RslRlPolicy`, and round `checker.timeout / control_dt`. |
+| [`mujoco_playground#391`](https://github.com/google-deepmind/mujoco_playground/pull/391) | Finding 1 | Replace unconditional POSIX `fcntl.flock` in `asset_loader.py` with a cross-platform `_file_lock` context manager (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows). |
