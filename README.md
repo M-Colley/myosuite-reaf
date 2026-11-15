@@ -1,5 +1,7 @@
 # myosuite-reaf
 
+[![CI](https://github.com/M-Colley/myosuite-reaf/actions/workflows/ci.yml/badge.svg)](https://github.com/M-Colley/myosuite-reaf/actions/workflows/ci.yml)
+
 **MyoSuite musculoskeletal environments authored on Google DeepMind's [`reaf-sim`](https://github.com/google-deepmind/reaf-sim) and [`mujoco_playground`](https://github.com/google-deepmind/mujoco_playground) (PyTorch + MuJoCo 4 + MuJoCo Warp 4).**
 
 `myosuite-reaf` is a standalone prototype and dogfooding suite that brings [MyoSuite](https://github.com/MyoHub/myosuite)'s Hill-type muscle biomechanics, physiological excitation pipeline, and cross-backend Gymnasium contract onto Google DeepMind's PyTorch Robotics Environment Authoring Framework (`reaf-sim` >= 1.0.1) and MuJoCo 4 (`mujoco` >= 4.0.1, `mujoco-warp` >= 4.0.1).

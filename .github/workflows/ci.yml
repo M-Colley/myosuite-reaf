@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-cpu:
+    name: CPU (${{ matrix.os }}, Python 3.13)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (CPU)
+        shell: bash
+        run: |
+          uv venv --python 3.13
+          printf 'mujoco[sysid]>=4.0.0\n' > "$RUNNER_TEMP/uv-overrides.txt"
+          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -e ".[dev]" --override "$RUNNER_TEMP/uv-overrides.txt"
+
+      - name: Lint and format check
+        shell: bash
+        run: |
+          uv run --no-sync ruff check src tests scripts
+          uv run --no-sync ruff format --check src tests scripts
+
+      - name: Run CPU test suite
+        shell: bash
+        run: |
+          uv run --no-sync pytest -v -m "not cuda"
