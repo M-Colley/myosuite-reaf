@@ -74,15 +74,13 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
 
 ---
 
-### Finding 2 — `myo-sim` + `mujoco` 4: Packaging Cap, Empty-Prefix `attach` Warning, Bare Mesh Path, and Stale Torso Yaw
+### Finding 2 — `myo-sim` + `mujoco` 4: Packaging Cap, Empty-Prefix `attach` Warning, and Legacy OSL Torso Conventions
 - **Component:** `MyoHub/myo_sim` (`myo-sim==0.2.5`) & `mujoco==4.0.1`
-- **Severity:** Medium (packaging + asset compatibility)
+- **Severity:** Medium (packaging + custom composition ergonomics)
 - **Root Causes:**
-  1. **`pyproject.toml` upper bound:** `myo-sim==0.2.5` declares `mujoco>=3.4,<4`, blocking installation alongside `reaf-sim>=1.0.1` (`mujoco[sysid]>=4.0.0`) unless overridden via `[tool.uv] override-dependencies = ["mujoco[sysid]>=4.0.0"]`.
-  2. **MuJoCo 4 `MjSpec.attach` empty-prefix warning:** `myo_sim.load_spec("myoarm_r")` attaches child sub-specs with an empty prefix (`prefix=""`), triggering MuJoCo 4.0.1 `WARNING: Attaching a spec with an empty prefix may prevent the model from being saved correctly`.
-  3. **Bare STL mesh path in legacy torso:** `models/legacy/torso/assets/myotorso_rigid_assets.xml:23` declares `<mesh file="torso_lowpoly-v1.stl" scale="1 1 1"/>` without the `meshes/` prefix, failing XML compilation when scene `meshdir` is not overridden.
-  4. **Stale 90° torso yaw in `myotorso_rigid_chain.xml:10`:** `myo-sim==0.2.5`'s `models/legacy/torso/assets/myotorso_rigid_chain.xml` still carries `<body name="torso" pos="0 0 0" euler="0 0 -1.57">` (already fixed in `MyoSuite`'s bundled XML), rotating the 37.4 kg rigid torso 90° relative to the pelvis/legs when composing `MyoLeg` (`obs0` quaternion mismatch of `0.7066` until neutralized with `<frame euler="0 0 1.57">` in [`assets.py`](src/myosuite_reaf/assets.py)).
-- **Proposed Upstream Fix:** Release `myo-sim 0.2.6` widening `mujoco>=3.4,<5`, passing non-empty prefixes in `load_spec`, prefixing `meshes/torso_lowpoly-v1.stl`, and syncing `myotorso_rigid_chain.xml` with `MyoSuite`.
+  1. **Intentional `pyproject.toml` upper bound (`MyoHub/myo_sim@57743dc`):** `myo-sim==0.2.5` intentionally pins `mujoco>=3.4,<4` until spatial-tendon side-site semantics are audited against MuJoCo 4.0 (aligning directly with Finding 14 below). Until `myo-sim` lifts `<4`, installing alongside `reaf-sim>=1.0.1` (`mujoco[sysid]>=4.0.0`) requires `[tool.uv] override-dependencies = ["mujoco[sysid]>=4.0.0"]`.
+  2. **MuJoCo 4 `MjSpec.attach` empty-prefix warning:** `myo_sim.load_spec("myoarm_r")` attaches child hand/arm sub-specs with `prefix=""` so muscle and joint names remain unprefixed, triggering MuJoCo 4.0.1 `WARNING: Attaching a spec with an empty prefix may prevent the model from being saved correctly`.
+  3. **Legacy OSL torso meshdir & yaw conventions (`MyoHub/myo_sim#131`):** `models/legacy/torso/assets/myotorso_rigid_assets.xml` and `myotorso_rigid_chain.xml` are authored relative to `myolegs_osl.xml` (`meshdir="../../meshes/"` and a compensating `euler="0 0 -1.57"` canceled by a wrapper body in `myolegs_osl.xml`), so standalone `MjSpec` composers outside `myolegs_osl.xml` must set `meshdir` to `models/meshes/` and neutralize the `-1.57` rad yaw (`<frame euler="0 0 1.57">` in [`assets.py`](src/myosuite_reaf/assets.py)).
 
 ---
 
@@ -154,7 +152,7 @@ Every finding below is backed by an executable test in [`tests/test_upstream_rea
   1. `TimeoutTerminationChecker` evaluates `time > self._timeout` strictly in `float32`. Because `N * sim_dt` accumulated in `float32` can land `-1 ULP` below `timeout` (e.g. `1.9999999` vs `2.0`), an episode configured for `100` steps (`2.0s` at `dt=0.02s`) can terminate on step `100` or step `101` depending on `sim_dt` binary representation.
   2. `vecenv_wrapper.py:48` computes `max_episode_length = int(episode_length_secs / ctrl_dt)` instead of `round(...)`. For `episode_length_secs=0.58, ctrl_dt=0.02`, IEEE-754 `0.58 / 0.02 == 28.999999999999996`, so `int(...)` truncates to `28` instead of `29`.
 - **Reproducer:** `tests/test_upstream_reaf_findings.py::test_finding_8_timeout_float32_boundary_and_vecenv_int_truncation`
-- **Upstream PR:** [`google-deepmind/mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390) — uses `round(checker.timeout / control_dt)` in `_derive_max_episode_length` (and `time >= (self._timeout - 0.5 * sim_dt)` remains an optional follow-up for `TimeoutTerminationChecker`).
+- **Upstream PR / Status:** [`google-deepmind/mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390) uses `round(checker.timeout / control_dt)` in `_derive_max_episode_length`; float32 clock accumulation drift in `ClockDevice` / `TimeoutTerminationChecker` was fixed upstream on `reaf-sim` `main` in `b76e81d`.
 
 ---
 
@@ -273,16 +271,19 @@ Generated via [`scripts/benchmark_throughput.py`](scripts/benchmark_throughput.p
 
 ---
 
-## 6. Submitted Upstream PRs (`google-deepmind/reaf-sim` & `google-deepmind/mujoco_playground`)
+## 6. Submitted Upstream PRs (`google-deepmind/reaf-sim`, `google-deepmind/mujoco_playground`, & `google-deepmind/tree`)
 
-All seven focused, single-concern upstream PRs have been opened against `main`:
+Ten focused, single-concern upstream PRs have been opened:
 
-| PR | Finding(s) | Summary |
+| PR | Finding(s) / Scope | Summary |
 | :--- | :--- | :--- |
 | [`reaf-sim#11`](https://github.com/google-deepmind/reaf-sim/pull/11) | Finding 5 | Refresh derived simulator quantities (`self.sim.forward()`) after the final physics substep in `DeviceLayer._substep()`. |
 | [`reaf-sim#12`](https://github.com/google-deepmind/reaf-sim/pull/12) | Finding 12 | Prevent `torch.inference_mode()` tensor tainting across `Environment`, `DeviceLayer`, `TaskLayer`, `Simulator`, `Clock`, and `TorchTensor`, and avoid in-place `TimeStep` mutation. |
-| [`reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13) | Finding 4 | Support `act` and `act_dot` spans on `BoundDataAccessor` (`sim.data.bind(sim.model, actuator_specs)`) via `actuator_actadr` / `actuator_actnum`. |
+| [`reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13) | Finding 4 | Support zero-host-sync `act` and `act_dot` spans on `BoundDataAccessor` (`sim.data.bind(sim.model, actuator_specs)`) via `actuator_actadr` / `actuator_actnum`. |
 | [`reaf-sim#14`](https://github.com/google-deepmind/reaf-sim/pull/14) | Finding 3 | Expose `"act"`, `"actuator_length"`, `"actuator_velocity"` measurements and `set_act(env_mask, act)` on `ActuatorDevice`. |
 | [`reaf-sim#15`](https://github.com/google-deepmind/reaf-sim/pull/15) | Finding 7 | Retain unnamed joints (`<freejoint/>`) in `ArticulatedDevice.initialize()` and fix `joint_range` spec/measurement shapes (`(num_joints, 2)` / `(nworld, num_joints, 2)`). |
+| [`reaf-sim#17`](https://github.com/google-deepmind/reaf-sim/pull/17) | Packaging (Py 3.15) | Widen `requires-python = ">=3.12,<3.16"` and raise the PyTorch upper bound to `torch<2.16` for Python 3.15 (`cp315`) wheels. |
 | [`mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390) | Findings 8 & 9 | Split flat RSL-RL actions across multi-key `action_spec` dicts in `RslRlVecEnvWrapper` and `play._RslRlPolicy`, and round `checker.timeout / control_dt`. |
 | [`mujoco_playground#391`](https://github.com/google-deepmind/mujoco_playground/pull/391) | Finding 1 | Replace unconditional POSIX `fcntl.flock` in `asset_loader.py` with a cross-platform `_file_lock` context manager (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows). |
+| [`mujoco_playground#393`](https://github.com/google-deepmind/mujoco_playground/pull/393) | Packaging (Py 3.14–3.15) | Widen `requires-python = ">=3.12,<3.16"` for simulation and `rl` extras while gating `<3.14` real-robot dependencies and enabling `torch<2.16` on Python 3.15. |
+| [`tree#162`](https://github.com/google-deepmind/tree/pull/162) | Packaging (`dm-tree` Py 3.15) | Build and ship `cp315` and free-threaded `cp315t` wheels for `dm-tree` across Linux (`x86_64`, `aarch64`), macOS (`universal2`), and Windows (`amd64`). |

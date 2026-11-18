@@ -62,7 +62,7 @@ flowchart LR
 
 ## Installation
 
-Requires **Python 3.12 or 3.13** and [`uv`](https://docs.astral.sh/uv/).
+Requires **Python 3.12–3.15** and [`uv`](https://docs.astral.sh/uv/) *(PyPI `reaf-sim==1.0.1` and `playground==1.0.1` currently cap metadata at `<3.15` / `<3.14` and `torch<2.14` until [`reaf-sim#17`](https://github.com/google-deepmind/reaf-sim/pull/17), [`mujoco_playground#393`](https://github.com/google-deepmind/mujoco_playground/pull/393), and [`tree#162`](https://github.com/google-deepmind/tree/pull/162) are released; Python 3.13 works out of the box today, and Python 3.15.2 is verified end-to-end across CPU, Warp CUDA graphs, and RSL-RL with `torch 2.15`)*.
 
 > **Note on `myo-sim` metadata:** `myo-sim==0.2.5` currently declares `mujoco>=3.4,<4` in its wheel metadata while `reaf-sim>=1.0.1` requires `mujoco[sysid]>=4.0.0`. [`pyproject.toml`](pyproject.toml) configures `[tool.uv] override-dependencies = ["mujoco[sysid]>=4.0.0"]` automatically so `uv` resolves MuJoCo 4 cleanly.
 
@@ -250,15 +250,18 @@ python scripts/probe_mj3_vs_mj4.py
 
 `myosuite-reaf` is intentionally structured so its modules map 1-to-1 into `MyoSuite` once `MyoSuite` and `myo-sim` lift their `mujoco<4` cap:
 
-1. **Submitted Upstream `reaf-sim` & `mujoco_playground` PRs** (detailed in [`DOGFOODING_REPORT.md`](DOGFOODING_REPORT.md)):
+1. **Submitted Upstream `reaf-sim`, `mujoco_playground`, & `dm-tree` PRs** (detailed in [`DOGFOODING_REPORT.md`](DOGFOODING_REPORT.md)):
    - [`reaf-sim#11`](https://github.com/google-deepmind/reaf-sim/pull/11): Refresh post-step derived simulator quantities via `self.sim.forward()` on `is_last_substep` in `DeviceLayer._substep()`.
    - [`reaf-sim#12`](https://github.com/google-deepmind/reaf-sim/pull/12): Prevent `torch.inference_mode()` tensor tainting across `Environment`, `DeviceLayer`, `TaskLayer`, `Simulator`, `Clock`, and `TorchTensor`.
-   - [`reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13): Support `act` and `act_dot` spans on `BoundDataAccessor` (`data.act` / `data.act_dot` indexed via `actuator_actadr` / `actuator_actnum`).
+   - [`reaf-sim#13`](https://github.com/google-deepmind/reaf-sim/pull/13): Support zero-host-sync `act` and `act_dot` spans on `BoundDataAccessor` (`data.act` / `data.act_dot` indexed via `actuator_actadr` / `actuator_actnum`).
    - [`reaf-sim#14`](https://github.com/google-deepmind/reaf-sim/pull/14): Add `"act"`, `"actuator_length"`, `"actuator_velocity"`, and `set_act()` to `ActuatorDevice`.
    - [`reaf-sim#15`](https://github.com/google-deepmind/reaf-sim/pull/15): Retain unnamed `<freejoint/>` joints and fix `joint_range` `(num_joints, 2)` shapes in `ArticulatedDevice`.
+   - [`reaf-sim#17`](https://github.com/google-deepmind/reaf-sim/pull/17): Support Python 3.15 (`requires-python = ">=3.12,<3.16"`) and `torch<2.16`.
    - [`mujoco_playground#390`](https://github.com/google-deepmind/mujoco_playground/pull/390): Split flat RSL-RL actions across multi-key `action_spec` dicts and round `checker.timeout / control_dt`.
    - [`mujoco_playground#391`](https://github.com/google-deepmind/mujoco_playground/pull/391): Support Windows file locking in `asset_loader.py` (`msvcrt.locking` fallback for `fcntl.flock`).
-2. **`myo-sim` v0.3 Release:** Widen `mujoco>=3.4,<5`, assign explicit attachment prefixes in `myoarm_r`, and backport the `MyoSuite` `<body name="torso">` frame fix into `myotorso_rigid_chain.xml`.
+   - [`mujoco_playground#393`](https://github.com/google-deepmind/mujoco_playground/pull/393): Support Python 3.14 and 3.15 (`requires-python = ">=3.12,<3.16"`) for simulation and `rl` extras.
+   - [`tree#162`](https://github.com/google-deepmind/tree/pull/162): Build and ship Python 3.15 (`cp315` and free-threaded `cp315t`) wheels for `dm-tree`.
+2. **`myo-sim` MuJoCo 4 Audit:** Audit spatial-tendon side-site wrapping against MuJoCo 4 (`MyoHub/myo_sim@57743dc`, specifically `recfem_r` / `recfem_l` on `MyoLeg`) and widen `mujoco>=3.4,<5`.
 3. **Move `src/myosuite_reaf/` -> `myosuite/envs/myo/backends/reaf/`:** Wire `make_env(..., backend="reaf")` alongside `MyoGymnasiumEnv` and `mjlab`, regenerating parity baselines under MuJoCo 4 (accounting for MuJoCo 4's updated cylinder/sphere spatial tendon `actuator_acc0` on `recfem_r`/`recfem_l`).
 
 ---
